@@ -13,6 +13,14 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    rules: {
+      // Allow French apostrophes (’) in JSX text without HTML-entity noise.
+      "react/no-unescaped-entities": ["error", { forbid: [">", "}"] }],
+      // Our async hooks set loading/loaded flags inside effects on purpose.
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Frood</string>
+    <string name="title_activity_main">Frood</string>
+    <string name="package_name">com.frood.app</string>
+    <string name="custom_url_scheme">com.frood.app</string>
+</resources>
