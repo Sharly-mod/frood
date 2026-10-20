@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
       status: 200,
       headers: {
         "Content-Type": contentType,
-        "Cache-Control": "public, max-age=86400",
+        "Cache-Control": "public, max-age=86400, immutable",
       },
     });
   } catch {

@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { readDiskCache, writeDiskCache } from "@/lib/disk-cache";
 
 const GOOGLE_KEY = process.env.GOOGLE_PLACES_API_KEY ?? "";
 const TTL_OK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -200,6 +201,8 @@ async function resolvePhotoUrl(name: string, address?: string): Promise<string |
   return commonsLookup(name, address);
 }
 
+const DISK_CACHE_NAMESPACE = "photos";
+
 async function lookupCached(name: string, address?: string): Promise<string | null> {
   const key = name.toLowerCase();
   const entry = cache.get(key);
@@ -208,11 +211,20 @@ async function lookupCached(name: string, address?: string): Promise<string | nu
     return entry.url;
   }
 
+  // Disk fallback: restarting the server must not re-hit Wikimedia/Google.
+  const diskEntry = await readDiskCache<CacheEntry>(DISK_CACHE_NAMESPACE, key, TTL_MISS_MS);
+  if (diskEntry) {
+    remember(key, diskEntry);
+    return diskEntry.url;
+  }
+
   const pending = inFlight.get(key) ?? resolvePhotoUrl(name, address);
   inFlight.set(key, pending);
   try {
     const url = await pending;
-    remember(key, { url, ts: Date.now() });
+    const resolved: CacheEntry = { url, ts: Date.now() };
+    remember(key, resolved);
+    void writeDiskCache(DISK_CACHE_NAMESPACE, key, resolved);
     return url;
   } finally {
     inFlight.delete(key);
@@ -296,7 +308,8 @@ export async function GET(request: NextRequest) {
     status: 200,
     headers: {
       "Content-Type": image.contentType,
-      "Cache-Control": "public, max-age=86400",
+      // Name-keyed URL is deterministic → the browser can cache it hard.
+      "Cache-Control": "public, max-age=86400, immutable",
     },
   });
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Cuisine, Restaurant } from "@/types/restaurant";
 import { haversineKm } from "@/lib/geo";
+import { readDiskCache, writeDiskCache } from "@/lib/disk-cache";
 
 /**
  * Free restaurant provider: OpenStreetMap via the Overpass API.
@@ -23,7 +24,8 @@ const OVERPASS_ENDPOINTS = (
   .filter(Boolean);
 
 const SEARCH_TIMEOUT_MS = 9000;
-const CACHE_TTL_MS = 15 * 60 * 1000;
+const CACHE_TTL_MS = 30 * 60 * 1000;
+const DISK_CACHE_NAMESPACE = "restaurants";
 /** Overpass (and other OSM mirrors) return 406 without a real User-Agent. */
 const REQUEST_HEADERS = {
   "Content-Type": "application/x-www-form-urlencoded",
@@ -381,13 +383,14 @@ function mapElement(element: {
  */
 async function enrichMissingAddresses(restaurants: Restaurant[]): Promise<Restaurant[]> {
   const missing = restaurants.filter((restaurant) => !restaurant.address);
-  if (missing.length === 0) {
+  // Skip pathological cases (huge areas) so this extra query can't hurt.
+  if (missing.length === 0 || missing.length > 40) {
     return restaurants;
   }
 
   const blocks = missing.map(
     (restaurant) =>
-      `way["addr:street"]["addr:housenumber"](around:35,${restaurant.latitude},${restaurant.longitude});`
+      `way["addr:street"]["addr:housenumber"](around:25,${restaurant.latitude},${restaurant.longitude});`
   );
 
   const ql = `[out:json][timeout:25];
@@ -448,8 +451,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json([]);
     }
     const cacheKey = `ids:${ids.join(",")}`;
-    const cached = getCached(cacheKey);
+    const cached = getCached(cacheKey) ?? (await readDiskCache<Restaurant[]>(DISK_CACHE_NAMESPACE, cacheKey, CACHE_TTL_MS));
     if (cached) {
+      setCached(cacheKey, cached);
       return NextResponse.json(byIdOrder(cached, ids));
     }
 
@@ -480,6 +484,7 @@ out center tags;`;
     try {
       const data = await queryOverpass(ql);
       setCached(cacheKey, data);
+      void writeDiskCache(DISK_CACHE_NAMESPACE, cacheKey, data);
       return NextResponse.json(byIdOrder(data, ids));
     } catch {
       return NextResponse.json([]);
@@ -495,19 +500,28 @@ out center tags;`;
   }
 
   const cacheKey = `search:${lat.toFixed(4)},${lng.toFixed(4)},${radiusMeters}`;
-  const cached = getCached(cacheKey);
+  const cached = getCached(cacheKey) ?? (await readDiskCache<Restaurant[]>(DISK_CACHE_NAMESPACE, cacheKey, CACHE_TTL_MS));
   if (cached) {
+    setCached(cacheKey, cached);
     return NextResponse.json(cached);
   }
 
-  const ql = `[out:json][timeout:25];
+  const ql = (radius: number) => `[out:json][timeout:25];
 (
-  nwr["amenity"~"^(restaurant|fast_food|cafe|ice_cream)$"]["name"](around:${radiusMeters},${lat},${lng});
+  nwr["amenity"~"^(restaurant|fast_food|cafe|ice_cream)$"]["name"](around:${radius},${lat},${lng});
 );
 out center tags 80;`;
 
   try {
-    const data = (await queryOverpass(ql))
+    // Progressive scan: a dense urban area fills 80 results within ~1.5 km, so
+    // the default 5 km view resolves in one fast query instead of a huge scan.
+    let data = await queryOverpass(ql(Math.min(radiusMeters, 1500)));
+    if (data.length < 80 && radiusMeters > 1500) {
+      const full = await queryOverpass(ql(radiusMeters));
+      const seen = new Set(data.map((restaurant) => restaurant.id));
+      data = data.concat(full.filter((restaurant) => !seen.has(restaurant.id)));
+    }
+    data = data
       .map((restaurant) => ({
         ...restaurant,
         distance: Math.round(haversineKm(lat, lng, restaurant.latitude, restaurant.longitude) * 10) / 10,
@@ -515,6 +529,7 @@ out center tags 80;`;
       .sort((a, b) => a.distance - b.distance);
     const enriched = await enrichMissingAddresses(data);
     setCached(cacheKey, enriched);
+    void writeDiskCache(DISK_CACHE_NAMESPACE, cacheKey, enriched);
     return NextResponse.json(enriched);
   } catch {
     return NextResponse.json({ error: "Fournisseur de restaurants indisponible." }, { status: 503 });
